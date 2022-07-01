@@ -7,3 +7,4 @@
 #define MAX_FILE_TYPE_LEN 32
 #define MAX_USER_LEN 32
 #define TIME_LEN 29
+#define MAX_INODE_DIGITS 11
