@@ -1,6 +1,8 @@
 // Header and Macros
 #include "headers.h"
 #include "macros.h"
+#include "render.h"
+
 
 // required functions
 void validateFileName(char *filepath);
@@ -8,13 +10,14 @@ bool isValidFilename(char *filepath);
 char *getFileType(mode_t st_mode);
 char *getFileOwner(uid_t uid);
 char *getFileGroup(gid_t gid);
-void getFilePerms(char *filepath, char **file_perms);
+void getFilePerms(char *filepath, char *file_perms);
 void getLast(char *timeStr, int len, struct timespec *ts);
-char *getFileContent(char *filepath);
+void getFileContent(char *filepath, char *content,unsigned long tcol);
 char **getFileExtensionAndCharset(char *filepath, struct magic_set *magic);
+unsigned long getTerminalSize(void);
 int timespec2str(char *buf, uint len, struct timespec *ts);
-void display(char *filename, unsigned long inode_no, char *file_type, char *file_extension, char *charset, unsigned long file_size, char *abspath, char **file_perms, char *file_owner, char *file_group, char *last_accessed, char *last_modified, char *content);
 void error(char *err_msg, int exitCode);
+
 
 // driver code
 int main(int argc, char *argv[])
@@ -33,24 +36,28 @@ int main(int argc, char *argv[])
 	struct magic_set *magic = magic_open(MAGIC_MIME | MAGIC_CHECK);
 	magic_load(magic, NULL);
 
+	unsigned long inode_no, size, tcol;
+	tcol = getTerminalSize();
+
 	char *filename = (char *)malloc(sizeof(char) * FILE_NAME_MAX_LEN);
 	char *file_extension = (char *)malloc(sizeof(char) * FILE_EXT_MAX_LEN);
 	char *charset = (char *)malloc(sizeof(char) * FILE_CSET_MAX_LEN);
+	char *file_inode = (char *)malloc(sizeof(char) * MAX_INODE_DIGITS);
+	char *file_size = (char *)malloc(sizeof(char) * FILE_EXT_MAX_LEN);
 	char *file_owner = (char *)malloc(sizeof(char) * MAX_USER_LEN);
 	char *file_group = (char *)malloc(sizeof(char) * MAX_USER_LEN);
 	char *last_accessed = (char *)malloc(sizeof(char) * TIME_LEN);
 	char *last_modified = (char *)malloc(sizeof(char) * TIME_LEN);
 	char *abspath = (char *)malloc(sizeof(char) * FILE_PATH_MAX_LEN);
-	char *content = (char *)malloc(sizeof(char) * MAX_CONTENT_LEN);
+	char *content = (char *)malloc(sizeof(char) * tcol-22);
 	char *file_type = (char *)malloc(sizeof(char) * MAX_FILE_TYPE_LEN);
 	char **file_magic = (char **)malloc(sizeof(char *) * 2);
-	char **file_perms = (char **)malloc(sizeof(char *) * 3);
-	unsigned long inode_no, file_size;
+	char *file_perms = (char *)malloc(sizeof(char ) * 20);
 
 	// store results
 	filename = basename(filepath);
 	inode_no = statbuf->st_ino;
-	file_size = statbuf->st_size;
+	size = statbuf->st_size;
 	file_type = getFileType(statbuf->st_mode);
 	file_magic = getFileExtensionAndCharset(filepath, magic);
 	file_extension = file_magic[0];
@@ -58,13 +65,29 @@ int main(int argc, char *argv[])
 	abspath = realpath(filepath, NULL);
 	getFilePerms(filepath, file_perms);
 	file_owner = getFileOwner(statbuf->st_uid);
-	file_group = getFileOwner(statbuf->st_gid);
+	file_group = getFileGroup(statbuf->st_gid);
 	getLast(last_accessed, TIME_LEN, &(statbuf->st_atim));
 	getLast(last_modified, TIME_LEN, &(statbuf->st_mtim));
-	content = getFileContent(filepath);
+	getFileContent(filepath, content, tcol);
 
-	// display results
-	display(filename, inode_no, file_type, file_extension, charset, file_size, abspath, file_perms, file_owner, file_group, last_accessed, last_modified, content);
+	snprintf(file_size, FILE_EXT_MAX_LEN, "%ld", size);
+	snprintf(file_inode, MAX_INODE_DIGITS, "%ld", inode_no);
+
+	// render details into terminal
+	render("Filename", filename, tcol);
+	render("Inode Number", file_inode, tcol);
+	render("Type", file_type, tcol);
+	render("Size", file_size, tcol);
+	render("Extension", file_extension, tcol);
+	render("Charset", charset, tcol);
+	render("Absolute Path", abspath, tcol);
+	render("Owner", file_owner, tcol);
+	render("Group", file_group, tcol);
+	render("Permission", file_perms, tcol);
+	render("Last Accessed", last_accessed, tcol);
+	render("Last Modified", last_modified, tcol);
+	render("Content", content, tcol);
+	finish_render(tcol);
 
 	// free allocated memory
 	free(filepath);
@@ -74,7 +97,7 @@ int main(int argc, char *argv[])
 	free(file_extension);
 	free(charset);
 	free(file_owner);
-	// free(file_group);
+	free(file_group);
 	free(last_accessed);
 	free(last_modified);
 	free(abspath);
@@ -112,14 +135,14 @@ char *getFileType(mode_t st_mode)
 	return "Unknown File Type";
 }
 
-void getFilePerms(char *filepath, char **file_perms)
+void getFilePerms(char *filepath, char *file_perms)
 {
-	if (access(filepath, R_OK))
-		file_perms[0] = "read";
-	if (access(filepath, W_OK))
-		file_perms[1] = "write";
-	if (access(filepath, X_OK))
-		file_perms[2] = "execute";
+	if (!access(filepath, R_OK))
+		strcat(file_perms, "  read");
+	if (!access(filepath, W_OK))
+		strcat(file_perms, "  write");
+	if (!access(filepath, X_OK))
+		strcat(file_perms, "  execute");
 }
 
 char *getFileOwner(uid_t uid)
@@ -144,31 +167,19 @@ void getLast(char *timeStr, int len, struct timespec *ts)
 		error("[-] Conversion from TIMESPEC to STRING failed", status);
 }
 
-char *getFileContent(char *filepath)
-{
-	return "demo content";
-}
+void getFileContent(char *filepath, char *content, unsigned long tcol) {
+	FILE *fp = fopen(filepath, "r");
+	char ch;
+	int count=0;
 
-void display(char *filename, unsigned long inode_no, char *file_type, char *file_extension, char *charset, unsigned long file_size, char *abspath, char **file_perms, char *file_owner, char *file_group, char *last_accessed, char *last_modified, char *content)
-{
-	printf("\nFilename: %s", filename);
-	printf("\nFile Type: %s", file_type);
-	printf("\nSize: %lu", file_size);
-	printf("\nExtention: %s", file_extension);
-	printf("\nCharset: %s", charset);
-	printf("\nAbsolute Path: %s", abspath);
-	printf("\nPermissions: %s %s %s", file_perms[0], file_perms[1], file_perms[2]); // make a better print
-	printf("\nOwner: %s", file_owner);
-	printf("\nGroup: %s", file_group);
-	printf("\nLast Accessed: %s", last_accessed);
-	printf("\nLast Modified: %s", last_modified);
-	printf("\nInode Number: %lu", inode_no);
-	printf("\n");
+	while ((ch = fgetc(fp)) != '\n' && count < tcol-22) {
+		content[count++] = ch;
+	}
 }
 
 char **getFileExtensionAndCharset(char *filepath, struct magic_set *magic)
 {
-	char *file_magic = (char *)malloc(sizeof(char) * FILE_CSET_MAX_LEN);
+	const char *file_magic = (char *)malloc(sizeof(char) * FILE_CSET_MAX_LEN);
 	char **ret = (char **)malloc(sizeof(char *) * FILE_CSET_MAX_LEN);
 	ret[0] = (char *)malloc(sizeof(char) * FILE_EXT_MAX_LEN);
 	ret[1] = (char *)malloc(sizeof(char) * FILE_EXT_MAX_LEN);
@@ -202,6 +213,13 @@ char **getFileExtensionAndCharset(char *filepath, struct magic_set *magic)
 	}
 
 	return ret;
+}
+
+unsigned long getTerminalSize(void) {
+	struct winsize w;
+    ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
+
+    return w.ws_col;
 }
 
 int timespec2str(char *buf, uint len, struct timespec *ts)
